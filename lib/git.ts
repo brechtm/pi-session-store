@@ -58,6 +58,11 @@ export async function currentBranch(
   exec: ExecFn,
   dir: string,
 ): Promise<string | undefined> {
+  // `branch --show-current` reports the branch even on an unborn HEAD (a fresh
+  // repo with no commits), where `rev-parse --abbrev-ref` fails.
+  const shown = await runGit(exec, dir, ["branch", "--show-current"]);
+  const name = shown.stdout.trim();
+  if (shown.code === 0 && name) return name;
   const r = await runGit(exec, dir, ["rev-parse", "--abbrev-ref", "HEAD"]);
   const value = r.stdout.trim();
   return r.code === 0 && value && value !== "HEAD" ? value : undefined;
