@@ -4,9 +4,9 @@
 
 A Pi extension that mirrors the active Pi session's JSONL transcript into a
 private git repository, keyed by session UUID. Snapshots are taken whenever the
-agent makes a commit and once when the session ends. A small `/session-log`
-command resolves a commit's `Pi-Session:` trailer back to the stored log, and can
-render/open it as HTML.
+agent makes a commit and once when the session ends. A `/session-store` command
+reports store status and resolves a commit's `Pi-Session:` trailer back to the
+stored log, optionally rendering/opening it as HTML.
 
 ## Motivation
 
@@ -30,7 +30,7 @@ Success means:
 - After an agent commit, the session transcript is committed (and pushed) to the
   configured private store repository.
 - `Pi-Session: <uuid>` in any surviving commit resolves to a stored log via
-  `/session-log <rev>`, regardless of rebases.
+  `/session-store get <rev>`, regardless of rebases.
 - Nothing is stored or uploaded anywhere unless the user has explicitly
   configured a store repository.
 - Every git or IO failure is contained: it never blocks, corrupts, or aborts the
@@ -148,10 +148,31 @@ Missing, unreadable, or unrecognized config ⇒ inert. There is no CLI flag in v
 - A rejected push (non-fast-forward, from another machine) warns once and is left
   for manual resolution; the extension never rebases mid-session.
 
-## Resolver: `/session-log`
+## Commands: `/session-store`
 
-Usage: `/session-log [<rev>|<uuid>]` (default `HEAD`). The name avoids the core
-`/session` command.
+A single command namespace, avoiding the core `/session` command and leaving
+room for future subcommands (`init`, `push`, `pull`). The first argument selects
+the subcommand.
+
+### `/session-store` or `/session-store status`
+
+Read-only diagnostic, no transcript content, no network by default:
+
+- Config: whether the extension is active, the config file path, and the resolved
+  store `path`.
+- Store health: path exists, is a git repo, current branch, and remote URL(s), so
+  you can confirm it is the private repo you expect.
+- Sync state: whether an upstream is configured and how many local commits are
+  ahead/behind it.
+- This session: the UUID, whether `sessions/<uuid>.jsonl` exists, its size and
+  last modification time, and whether a snapshot is pending.
+- Last outcome: the most recent snapshot/push result, so failures are not only
+  transient notifications.
+
+### `/session-store get [<rev>|<uuid>] [--view]`
+
+Resolve a commit or session UUID to the stored transcript. Default revision is
+`HEAD`.
 
 - A UUID-shaped argument (36 chars, hex + hyphens) is used directly; anything
   else is treated as a git rev. Resolution reads the local clone only; it does
@@ -164,17 +185,18 @@ Usage: `/session-log [<rev>|<uuid>]` (default `HEAD`). The name avoids the core
 - Not found: explain the likely cause (no trailer, session never flushed, not
   pulled, wrong store). If the UUID is the *current live* session and has not been
   flushed yet, point to the live session file instead.
-- `--view` flag: export the stored JSONL to HTML via
-  `pi --export <path> <cache>/<uuid>.html` and open it with the platform opener
-  (`open` / `xdg-open` / `start`). Rendering adds no new dependency and matches
-  the built-in `/export` output.
+- `--view`: export the stored JSONL to HTML via `pi --export <path>
+  <cache>/<uuid>.html` and open it with the platform opener (`open` / `xdg-open`
+  / `start`). Rendering adds no new dependency and matches the built-in `/export`
+  output.
+- Unknown subcommand or bad arguments ⇒ short usage message, never a crash.
 - No config or no store ⇒ clear error message, never a crash.
 
 ## Viewing Stored Logs (documentation)
 
 - Interactive: `pi --session <path>` or `/import <path>`.
-- HTML: `pi --export <path> [out.html]`, then open the file; `/session-log --view`
-  wraps this.
+- HTML: `pi --export <path> [out.html]`, then open the file;
+  `/session-store get <rev> --view` wraps this.
 
 ## Error Handling
 
@@ -196,12 +218,13 @@ Usage: `/session-log [<rev>|<uuid>]` (default `HEAD`). The name avoids the core
 ```
 ~/Code/pi-session-store/
   package.json            # name, "pi-package" keyword, pi.extensions manifest
-  index.ts                # extension wiring: events + /session-log command
+  index.ts                # extension wiring: events + /session-store command
   lib/config.ts           # load/validate config, ~ expansion
   lib/commit-detect.ts    # bash command -> "contains a git commit"
   lib/git.ts              # thin git wrappers over an injected exec function
   lib/snapshot.ts         # compare/write/commit/push a session snapshot
   lib/resolve.ts          # trailer parsing, lookup, summary, HTML view
+  lib/status.ts           # read-only diagnostics for /session-store status
   test/*.test.ts          # unit + integration tests
   README.md
   docs/superpowers/specs/2026-09-20-pi-session-store-design.md
@@ -222,9 +245,10 @@ Usage: `/session-log [<rev>|<uuid>]` (default `HEAD`). The name avoids the core
 - **Integration (temporary git repo as the store):** snapshot writes
   `sessions/<uuid>.jsonl` and creates a commit; unchanged content is a no-op; a
   subsequent snapshot appends a new commit; push works against a local bare
-  remote; `/session-log` resolution finds the file.
+  remote; `/session-store status` reports the same state; `/session-store get`
+  resolution finds the file.
 - **Smoke:** run with `pi -e`, make a real agent commit, confirm the store updated
-  and `/session-log` resolves.
+  and `/session-store get` resolves.
 
 ## Security and Privacy
 
@@ -241,8 +265,6 @@ Usage: `/session-log [<rev>|<uuid>]` (default `HEAD`). The name avoids the core
 
 ## Future / Open Questions
 
-- `/session-store status` diagnostic command (config, store health, sync state,
-  last snapshot outcome).
 - Caching location and lifetime for `--view` output.
 - Optional git-notes provenance attached to code commits.
 - Optional redaction/secret scanning before committing a snapshot.
