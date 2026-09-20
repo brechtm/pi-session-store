@@ -50,8 +50,8 @@ afterEach(() => {
   fs.rmSync(sessionFile, { force: true });
 });
 
-async function commitCount(): Promise<number> {
-  const r = await runGit(testExec, store, ["rev-list", "--count", "HEAD"]);
+async function commitCount(repo: string = store): Promise<number> {
+  const r = await runGit(testExec, repo, ["rev-list", "--count", "HEAD"]);
   return Number.parseInt(r.stdout.trim(), 10) || 0;
 }
 
@@ -109,5 +109,66 @@ describe("snapshotSession", () => {
     });
     expect(result.status).toBe("skipped");
     expect(await commitCount()).toBe(0);
+  });
+
+  it("recovers a previously failed commit on the next snapshot", async () => {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), "pi-store-recover-"));
+    try {
+      await runGit(testExec, repo, ["init", "-b", "main"]);
+      await runGit(testExec, repo, ["config", "user.email", "t@example.com"]);
+      await runGit(testExec, repo, ["config", "user.name", "Test"]);
+      // A failing pre-commit hook makes `git commit` fail after `git add` has
+      // already staged the file, reproducing the failed-commit-then-unchanged
+      // data-loss path.
+      const hook = path.join(repo, ".git", "hooks", "pre-commit");
+      fs.writeFileSync(hook, "#!/bin/sh\nexit 1\n");
+      fs.chmodSync(hook, 0o755);
+
+      const params = {
+        exec: testExec,
+        storePath: repo,
+        sessionFile,
+        sessionId,
+        trigger: "commit" as const,
+      };
+      const first = await snapshotSession(params);
+      expect(first.status).toBe("error");
+
+      fs.rmSync(hook, { force: true });
+      const second = await snapshotSession(params);
+      expect(second.status).toBe("written");
+      expect(await commitCount(repo)).toBe(1);
+    } finally {
+      fs.rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("retries git index-lock contention with capped backoff", async () => {
+    let addCalls = 0;
+    const locking: ExecFn = async (command, args, options) => {
+      if (args.includes("add")) {
+        addCalls += 1;
+        if (addCalls <= 2) {
+          return {
+            stdout: "",
+            stderr:
+              "fatal: Unable to create '/x/.git/index.lock': File exists.",
+            code: 128,
+          };
+        }
+      }
+      return testExec(command, args, options);
+    };
+    const result = await snapshotSession({
+      exec: locking,
+      storePath: store,
+      sessionFile,
+      sessionId,
+      trigger: "commit",
+      sleep: async () => {},
+    });
+    expect(result.status).toBe("written");
+    expect(addCalls).toBe(3);
+    expect(await commitCount()).toBe(1);
   });
 });

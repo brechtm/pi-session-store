@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { runGit } from "./git.ts";
+import { gitOk, runGit, type GitResult } from "./git.ts";
 import type { ExecFn } from "./types.ts";
 
 export type SnapshotTrigger = "commit" | "session-end";
@@ -11,6 +11,10 @@ export interface SnapshotParams {
   sessionFile: string;
   sessionId: string;
   trigger: SnapshotTrigger;
+  /** Injected for tests to avoid real backoff delays. */
+  sleep?: (ms: number) => Promise<void>;
+  /** Capped exponential backoff delays between index-lock retries. */
+  retryDelaysMs?: number[];
 }
 
 export interface SnapshotResult {
@@ -22,10 +26,40 @@ export function sessionRelPath(sessionId: string): string {
   return path.join("sessions", `${sessionId}.jsonl`);
 }
 
+const DEFAULT_RETRY_DELAYS = [50, 100, 200];
+const LOCK_RE =
+  /index\.lock|Another git process seems to be running|unable to create.*index\.lock/i;
+
+async function runGitWithLockRetry(
+  exec: ExecFn,
+  storePath: string,
+  args: string[],
+  sleep: (ms: number) => Promise<void>,
+  delays: number[],
+): Promise<GitResult> {
+  let result = await runGit(exec, storePath, args);
+  for (const delay of delays) {
+    if (gitOk(result) || !LOCK_RE.test(`${result.stdout}\n${result.stderr}`)) {
+      return result;
+    }
+    await sleep(delay);
+    result = await runGit(exec, storePath, args);
+  }
+  return result;
+}
+
 export async function snapshotSession(
   params: SnapshotParams,
 ): Promise<SnapshotResult> {
-  const { exec, storePath, sessionFile, sessionId, trigger } = params;
+  const {
+    exec,
+    storePath,
+    sessionFile,
+    sessionId,
+    trigger,
+    sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)),
+    retryDelaysMs = DEFAULT_RETRY_DELAYS,
+  } = params;
 
   let content: Buffer;
   try {
@@ -37,14 +71,6 @@ export async function snapshotSession(
   const rel = sessionRelPath(sessionId);
   const dest = path.join(storePath, rel);
   try {
-    if (fs.existsSync(dest) && fs.readFileSync(dest).equals(content)) {
-      return { status: "unchanged" };
-    }
-  } catch {
-    // fall through and overwrite
-  }
-
-  try {
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.writeFileSync(dest, content);
   } catch (error) {
@@ -54,8 +80,14 @@ export async function snapshotSession(
     };
   }
 
-  const add = await runGit(exec, storePath, ["add", "--", rel]);
-  if (add.code !== 0) {
+  const add = await runGitWithLockRetry(
+    exec,
+    storePath,
+    ["add", "--", rel],
+    sleep,
+    retryDelaysMs,
+  );
+  if (!gitOk(add)) {
     return {
       status: "error",
       message: `git add failed: ${(add.stderr || add.stdout).trim()}`,
@@ -63,14 +95,14 @@ export async function snapshotSession(
   }
 
   const message = `Snapshot ${sessionId} (${trigger})`;
-  const commit = await runGit(exec, storePath, [
-    "commit",
-    "-m",
-    message,
-    "--",
-    rel,
-  ]);
-  if (commit.code !== 0) {
+  const commit = await runGitWithLockRetry(
+    exec,
+    storePath,
+    ["commit", "-m", message, "--", rel],
+    sleep,
+    retryDelaysMs,
+  );
+  if (!gitOk(commit)) {
     const output = `${commit.stdout}\n${commit.stderr}`;
     if (/nothing to commit|no changes added/i.test(output)) {
       return { status: "unchanged" };

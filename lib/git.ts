@@ -4,6 +4,12 @@ export interface GitResult {
   code: number;
   stdout: string;
   stderr: string;
+  killed: boolean;
+}
+
+/** A git invocation succeeded only if it exited zero and was not killed. */
+export function gitOk(result: GitResult): boolean {
+  return result.code === 0 && !result.killed;
 }
 
 export async function runGit(
@@ -13,22 +19,27 @@ export async function runGit(
   timeout = 10_000,
 ): Promise<GitResult> {
   const result = await exec("git", ["-C", cwd, ...args], { cwd, timeout });
-  return { code: result.code, stdout: result.stdout, stderr: result.stderr };
+  return {
+    code: result.code,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    killed: result.killed ?? false,
+  };
 }
 
 export async function isGitRepo(exec: ExecFn, dir: string): Promise<boolean> {
-  const { code } = await runGit(exec, dir, ["rev-parse", "--git-dir"]);
-  return code === 0;
+  return gitOk(await runGit(exec, dir, ["rev-parse", "--git-dir"]));
 }
 
 export async function hasUpstream(exec: ExecFn, dir: string): Promise<boolean> {
-  const { code } = await runGit(exec, dir, [
-    "rev-parse",
-    "--abbrev-ref",
-    "--symbolic-full-name",
-    "@{u}",
-  ]);
-  return code === 0;
+  return gitOk(
+    await runGit(exec, dir, [
+      "rev-parse",
+      "--abbrev-ref",
+      "--symbolic-full-name",
+      "@{u}",
+    ]),
+  );
 }
 
 export async function pullStore(
@@ -36,9 +47,9 @@ export async function pullStore(
   dir: string,
 ): Promise<{ ok: boolean; error?: string }> {
   const r = await runGit(exec, dir, ["pull", "--ff-only"], 30_000);
-  return r.code === 0
+  return gitOk(r)
     ? { ok: true }
-    : { ok: false, error: (r.stderr || r.stdout).trim() };
+    : { ok: false, error: (r.stderr || r.stdout).trim() || "git pull failed" };
 }
 
 export async function pushStore(
@@ -49,9 +60,9 @@ export async function pushStore(
     return { pushed: false, skipped: "no upstream" };
   }
   const r = await runGit(exec, dir, ["push"], 30_000);
-  return r.code === 0
+  return gitOk(r)
     ? { pushed: true }
-    : { pushed: false, error: (r.stderr || r.stdout).trim() };
+    : { pushed: false, error: (r.stderr || r.stdout).trim() || "git push failed" };
 }
 
 export async function currentBranch(
@@ -62,10 +73,10 @@ export async function currentBranch(
   // repo with no commits), where `rev-parse --abbrev-ref` fails.
   const shown = await runGit(exec, dir, ["branch", "--show-current"]);
   const name = shown.stdout.trim();
-  if (shown.code === 0 && name) return name;
+  if (gitOk(shown) && name) return name;
   const r = await runGit(exec, dir, ["rev-parse", "--abbrev-ref", "HEAD"]);
   const value = r.stdout.trim();
-  return r.code === 0 && value && value !== "HEAD" ? value : undefined;
+  return gitOk(r) && value && value !== "HEAD" ? value : undefined;
 }
 
 export async function remoteUrl(
@@ -75,7 +86,7 @@ export async function remoteUrl(
 ): Promise<string | undefined> {
   const r = await runGit(exec, dir, ["remote", "get-url", remote]);
   const value = r.stdout.trim();
-  return r.code === 0 && value ? value : undefined;
+  return gitOk(r) && value ? value : undefined;
 }
 
 export async function aheadBehind(
@@ -89,7 +100,7 @@ export async function aheadBehind(
     "--left-right",
     "@{u}...HEAD",
   ]);
-  if (r.code !== 0) return undefined;
+  if (!gitOk(r)) return undefined;
   const [behindText, aheadText] = r.stdout.trim().split(/\s+/);
   const behind = Number.parseInt(behindText ?? "", 10);
   const ahead = Number.parseInt(aheadText ?? "", 10);
@@ -103,5 +114,5 @@ export async function showCommitMessage(
   rev: string,
 ): Promise<string | undefined> {
   const r = await runGit(exec, cwd, ["show", "-s", "--format=%B", rev]);
-  return r.code === 0 ? r.stdout : undefined;
+  return gitOk(r) ? r.stdout : undefined;
 }
