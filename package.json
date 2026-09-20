@@ -1,0 +1,17 @@
+{
+  "name": "pi-session-store",
+  "version": "0.1.0",
+  "description": "Mirror Pi session transcripts into a private git store, keyed by Pi-Session commit trailers",
+  "type": "module",
+  "keywords": ["pi-package"],
+  "pi": { "extensions": ["./index.ts"] },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}
