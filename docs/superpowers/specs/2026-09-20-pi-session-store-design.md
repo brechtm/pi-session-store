@@ -44,6 +44,10 @@ Success means:
 - Auto-creating or cloning the store repository (an existing clone is required).
 - An LLM-callable tool that returns transcript content (context-safety); the
   command surface is text + optional browser view.
+- Recording authoritative provenance (the triggering commit's subject/hash) in
+  store commits; store commits identify only the session and the trigger.
+- Detecting or overriding a public store remote; keeping the store private is
+  documented, not enforced.
 
 ## Assumptions and Dependencies
 
@@ -67,11 +71,15 @@ Success means:
 - **Store:** an existing git working copy at a configured filesystem path.
 - **Layout:** one file per session, `sessions/<uuid>.jsonl`. Flat and
   deterministic, so resolution requires no index.
-- **Provenance (optional, non-authoritative):** when a snapshot was triggered by a
-  commit, the store commit message records that commit's subject and
-  hash-at-the-time. Nothing reads this for lookup; it is for human history only.
+- **Store commit message:** identifies the session UUID and whether the snapshot
+  was triggered by a commit or by session end. It carries no commit subject/hash;
+  authoritative provenance is deferred (see Future).
 
 ## Lifecycle
+
+The extension runs in all Pi run modes (TUI, RPC, print, JSON). Snapshots happen
+in every mode; user-facing notifications are emitted only when `ctx.hasUI` is
+true, so JSON/print output is never polluted.
 
 1. **`session_start`**
    - Load and validate config. No config ⇒ the extension is completely inert for
@@ -84,6 +92,9 @@ Success means:
      `git commit` invocation. If so, raise a per-session "commit happened" flag.
    - The test only needs a boolean: over-detection is harmless because snapshots
      are content-deduped and a redundant snapshot produces no commit.
+   - Skip detection entirely when `ctx.cwd` resolves inside the store repository:
+     snapshotting the store into itself risks index contention and commits the
+     session into the wrong repo.
 3. **`turn_end` with the flag set**
    - Perform a snapshot (below), then clear the flag.
    - Snapshot at `turn_end` rather than at `tool_result` because the session JSONL
@@ -94,9 +105,12 @@ Success means:
    1. Resolve the session file; skip if absent (e.g. in-memory session).
    2. Compare bytes with `sessions/<uuid>.jsonl`; skip if identical.
    3. Write the file into the store.
-   4. `git add` + `git commit` (message carries the UUID and, when applicable,
-      the triggering commit's subject/hash).
+   4. `git add` + `git commit` with a message identifying the session UUID and
+      the trigger (commit or session end).
    5. Push (below), if enabled.
+   - Snapshots are serialized within the process. Across processes (two Pi
+     sessions sharing one store), git index-lock failures are retried with
+     capped exponential backoff before warning.
 5. **`session_shutdown`**
    - Final snapshot (await the copy and local commit) and a final awaited push
      attempt, with a timeout, so the tail after the last commit and any
@@ -150,7 +164,7 @@ Usage: `/session-log [<rev>|<uuid>]` (default `HEAD`). The name avoids the core
 - Not found: explain the likely cause (no trailer, session never flushed, not
   pulled, wrong store). If the UUID is the *current live* session and has not been
   flushed yet, point to the live session file instead.
-- `--view` (optional): export the stored JSONL to HTML via
+- `--view` flag: export the stored JSONL to HTML via
   `pi --export <path> <cache>/<uuid>.html` and open it with the platform opener
   (`open` / `xdg-open` / `start`). Rendering adds no new dependency and matches
   the built-in `/export` output.
@@ -165,13 +179,17 @@ Usage: `/session-log [<rev>|<uuid>]` (default `HEAD`). The name avoids the core
 ## Error Handling
 
 - Handlers never throw; everything is caught.
-- Actionable failures surface as non-blocking `ctx.ui.notify(..., "warning")`,
-  de-duplicated per session so a broken remote cannot spam.
+- Actionable failures surface as non-blocking `ctx.ui.notify(..., "warning")`
+  when `ctx.hasUI`, de-duplicated per session so a broken remote cannot spam.
 - Local copy + commit are awaited (fast); network push is not, except at
   shutdown.
 - All `pi.exec` calls carry a timeout.
-- Explicit cases: missing session file; store missing or not a repo; git lock
-  contention (retry once, then warn); push rejected; config parse failure.
+- Explicit cases: missing session file; store missing or not a repo; git
+  index-lock contention (retry with capped backoff, then warn); push rejected;
+  config parse failure.
+- A push rejected by GitHub secret scanning is treated like any other push
+  failure: warn once, keep the local commit, and never attempt to bypass the
+  protection.
 
 ## Project Layout
 
@@ -212,6 +230,10 @@ Usage: `/session-log [<rev>|<uuid>]` (default `HEAD`). The name avoids the core
 
 - The extension never changes a repository's visibility; keeping the store private
   is the user's responsibility and is documented in the README.
+- A public store remote is not detected or blocked; the user must confirm the
+  store remote is private.
+- GitHub secret scanning may reject a push; the extension does not attempt to
+  bypass it.
 - Transcripts may contain secrets or sensitive work. Once committed they persist
   in git history even if later deleted; the store is assumed private and
   single-user.
@@ -219,6 +241,11 @@ Usage: `/session-log [<rev>|<uuid>]` (default `HEAD`). The name avoids the core
 
 ## Future / Open Questions
 
+- `/session-store status` diagnostic command (config, store health, sync state,
+  last snapshot outcome).
 - Caching location and lifetime for `--view` output.
 - Optional git-notes provenance attached to code commits.
 - Optional redaction/secret scanning before committing a snapshot.
+- Append-only delta copy instead of a full byte comparison per snapshot.
+- Compaction/LFS for large transcripts; retention and deletion.
+- A one-time `init` helper (`gh repo create` + clone + config).
