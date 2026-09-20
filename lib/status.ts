@@ -4,9 +4,9 @@ import type { Config } from "./config.ts";
 import {
   aheadBehind,
   currentBranch,
+  hasUpstream,
   isGitRepo,
   remoteUrl,
-  runGit,
 } from "./git.ts";
 import type { ExecFn } from "./types.ts";
 
@@ -61,7 +61,7 @@ export async function buildStatus(input: StatusInput): Promise<StatusReport> {
   const remote = await remoteUrl(exec, storePath);
   lines.push(`remote: ${remote ?? "(none)"}`);
 
-  if (await hasUpstreamSafe(exec, storePath)) {
+  if (await hasUpstream(exec, storePath)) {
     const counts = await aheadBehind(exec, storePath);
     lines.push(
       `sync: ${
@@ -101,14 +101,4 @@ export async function buildStatus(input: StatusInput): Promise<StatusReport> {
   }
 
   return { text: lines.join("\n"), level: "info" };
-}
-
-async function hasUpstreamSafe(exec: ExecFn, dir: string): Promise<boolean> {
-  const r = await runGit(exec, dir, [
-    "rev-parse",
-    "--abbrev-ref",
-    "--symbolic-full-name",
-    "@{u}",
-  ]);
-  return r.code === 0;
 }
